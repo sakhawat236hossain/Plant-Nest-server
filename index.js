@@ -19,6 +19,7 @@ app.use(express.json());
 app.use(
   cors({
     origin: process.env.CLIENT_DOMAIN || "http://localhost:5173",
+    // CLIENT_DOMAIN
     credentials: true,
     optionSuccessStatus: 200,
   })
@@ -58,9 +59,35 @@ async function run() {
     const db = client.db("plantsDB");
     const plantsCollection = db.collection("allPlants");
     const ordersCollection = db.collection("orders");
+    const usersCollection = db.collection("users");
+    const sellerRequestsCollection = db.collection("sellerRequests");
+
+
+       //-------------------------- role middlewares------------------------
+  const verifyADMIN = async (req, res, next) => {
+      const email = req.tokenEmail
+      const user = await usersCollection.findOne({ email })
+      if (user?.role !== 'admin')
+        return res
+          .status(403)
+          .send({ message: 'Admin only Actions!', role: user?.role })
+
+      next()
+    }
+
+    const verifySELLER = async (req, res, next) => {
+      const email = req.tokenEmail
+      const user = await usersCollection.findOne({ email })
+      if (user?.role !== 'seller')
+        return res
+          .status(403)
+          .send({ message: 'Seller only Actions!', role: user?.role })
+
+      next()
+    }
 
     // Save a plant data in db
-    app.post("/plants", async (req, res) => {
+    app.post("/plants",verifyJWT,verifySELLER, async (req, res) => {
       const plantData = req.body;
       const result = await plantsCollection.insertOne(plantData);
       res.send(result);
@@ -161,14 +188,15 @@ async function run() {
     });
 
     // get all orders for a customer by email
-    app.get("/my-orders/:email", async (req, res) => {
-      const email = req.params.email;
-      const result = await ordersCollection.find({ customer: email }).toArray();
+    app.get("/my-orders", verifyJWT, async (req, res) => {
+      const result = await ordersCollection
+        .find({ customer: req.tokenEmail })
+        .toArray();
       res.send(result);
     });
 
     // get all orders for a seller by email
-    app.get("/manage-orders/:email", async (req, res) => {
+    app.get("/manage-orders/:email",verifyJWT,verifySELLER, async (req, res) => {
       const email = req.params.email;
 
       const result = await ordersCollection
@@ -187,15 +215,82 @@ async function run() {
       res.send(result);
     });
 
-
-    
     // delete plant for a seller by email
-    app.delete("/my-inventory/:id", async (req, res) => {
+    app.delete("/my-inventory/:id",verifyJWT,verifySELLER, async (req, res) => {
       const { id } = req.params;
 
-      const result = await plantsCollection.deleteOne({_id:new ObjectId(id)});
+      const result = await plantsCollection.deleteOne({
+        _id: new ObjectId(id),
+      });
       res.send(result);
     });
+
+    // ----------------USERS--------------------
+    app.post("/user", async (req, res) => {
+      const userDta = req.body;
+      // console.log(userDta);
+      userDta.created_At = new Date().toISOString();
+      userDta.last_loggedIn = new Date().toISOString();
+      userDta.role = "customer";
+      const query = { email: userDta.email };
+      const alreadyExists = await usersCollection.findOne(query);
+      console.log("user already exists", !!alreadyExists);
+      if (alreadyExists) {
+        console.log("updating user info....");
+        const result = await usersCollection.updateOne(query, {
+          $set: { last_loggedIn: new Date().toISOString() },
+        });
+        return res.send(result);
+      }
+      console.log("saving new user info....");
+      const result = await usersCollection.insertOne(userDta);
+      res.send(result);
+    });
+
+    // get a user's role
+    app.get("/user/role", verifyJWT, async (req, res) => {
+      const result = await usersCollection.findOne({ email: req.tokenEmail });
+      res.send({ role: result?.role });
+    });
+
+    // save become-seller request
+    app.post("/become-seller", verifyJWT, async (req, res) => {
+      const email = req.tokenEmail;
+      const alreadyExists = await sellerRequestsCollection.findOne({ email });
+      if (alreadyExists) {
+        return res.status(409).send({ message: "Already requested, withting" });
+      }
+
+      const result = await sellerRequestsCollection.insertOne({ email });
+      res.send(result);
+    });
+
+    // get all seller requests for admin
+    app.get("/seller-requests", verifyJWT,verifyADMIN, async (req, res) => {
+      const result = await sellerRequestsCollection.find().toArray();
+      res.send(result);
+    });
+
+    // update a user's role
+    app.patch("/update-role", verifyJWT,verifyADMIN, async (req, res) => {
+      const { email, role } = req.body;
+      const result = await usersCollection.updateOne(
+        { email },
+        { $set: { role } }
+      );
+      await sellerRequestsCollection.deleteOne({ email });
+
+      res.send(result);
+    });
+
+    // get all users for admin
+    app.get("/users", verifyJWT,verifyADMIN, async (req, res) => {
+      const adminEmail = req.tokenEmail
+      const result = await usersCollection.find({ email: { $ne: adminEmail } }).toArray();
+      res.send(result);
+    });
+
+
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
